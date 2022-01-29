@@ -6,8 +6,14 @@
 #include <string.h> /* strerror */
 #include <sys/types.h> /* pid_t */
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h> /* getpid */
 #include <fcntl.h>
+#ifdef SYS_pidfd_open
+#include <poll.h>
+#else
+#include <time.h>
+#endif
 
 #ifndef sighandler_t
 typedef __sighandler_t sighandler_t;
@@ -47,25 +53,74 @@ static int lua_linux_kill(lua_State *l) {
 
 static int lua_linux_waitpid(lua_State *l) {
   pid_t pid, r;
-  int options, status;
+  int options, status, timoutMs, sleepTime;
   pid = (pid_t) luaL_checkinteger(l, 1);
-  options = (pid_t) lua_tointeger(l, 2);
-  r = waitpid(pid, &status, options);
-  if (r < 0) {
+  options = luaL_optinteger(l, 2, 0);
+  timoutMs = luaL_optinteger(l, 3, options & WNOHANG ? 0 : -1);
+  sleepTime = luaL_optinteger(l, 4, 500);
+  status = 0;
+  r = 1;
+  if (timoutMs >= 0) {
+    if (timoutMs > 0) {
+#ifdef SYS_pidfd_open
+      int fd = syscall(SYS_pidfd_open, pid, 0);
+      if (fd > 0) {
+        struct pollfd pfd = {fd, POLLIN, 0};
+        r = poll(&pfd, 1, timoutMs);
+      }
+#endif
+    }
+    options |= WNOHANG;
+  }
+  if (r == 1) {
+#ifdef SYS_pidfd_open
+    r = waitpid(pid, &status, options);
+#else
+    struct timespec ts, rts;
+    int sleepTotalTime = 0;
+    for (;;) {
+      r = waitpid(pid, &status, options);
+      if ((r != 0) || ((timoutMs >= 0) && (sleepTotalTime >= timoutMs))) {
+        break;
+      }
+      ts.tv_sec = sleepTime / 1000;
+      ts.tv_nsec = (sleepTime % 1000) * 1000000;
+      if (nanosleep(&ts, &rts) == -1) {
+        sleepTotalTime += rts.tv_sec * 1000 + rts.tv_nsec / 1000000;
+      } else {
+        sleepTotalTime += sleepTime;
+      }
+    }
+#endif
+  }
+  if (r < 0) { // error
     r = errno;
-		lua_pushnil(l);
+    lua_pushnil(l);
     lua_pushinteger(l, r);
     return 2;
   }
+  const char *what = "na";
+  if (r == 0) { // timeout
+    what = "timeout";
+    status = 0;
+  } else {
+    if (WIFEXITED(status)) {
+      what = "exit";
+      status = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+      what = "signal";
+      status = WTERMSIG(status);
+    }
+  }
   lua_pushinteger(l, r);
-  lua_pushboolean(l, WIFEXITED(status));
-  lua_pushinteger(l, WEXITSTATUS(status));
+  lua_pushstring(l, what);
+  lua_pushinteger(l, status);
   return 3;
 }
 
 static int lua_linux_strerror(lua_State *l) {
   int errnum = (int) lua_tointeger(l, 1);
-	lua_pushstring(l, strerror(errnum));
+  lua_pushstring(l, strerror(errnum));
   return 1;
 }
 
@@ -76,26 +131,26 @@ static int lua_linux_getpid(lua_State *l) {
 }
 
 static int getFileDesc(lua_State *l, int arg) {
-	int fd;
-	luaL_Stream *pLuaStream;
-	pLuaStream = (luaL_Stream *)luaL_testudata(l, arg, LUA_FILEHANDLE);
-	if (pLuaStream != NULL) {
-		fd = fileno(pLuaStream->f);
-	} else {
-		fd = luaL_checkinteger(l, arg);
-	}
-	return fd;
+  int fd;
+  luaL_Stream *pLuaStream;
+  pLuaStream = (luaL_Stream *)luaL_testudata(l, arg, LUA_FILEHANDLE);
+  if (pLuaStream != NULL) {
+    fd = fileno(pLuaStream->f);
+  } else {
+    fd = luaL_checkinteger(l, arg);
+  }
+  return fd;
 }
 
 static int lua_linux_fcntl(lua_State *l) {
-	int fd = getFileDesc(l, 1);
+  int fd = getFileDesc(l, 1);
   int cmd, arg, r;
   cmd = (int) luaL_checkinteger(l, 2);
   arg = (int) lua_tointeger(l, 3);
   r = fcntl(fd, cmd, arg);
   if (r == -1) {
     r = errno;
-		lua_pushnil(l);
+    lua_pushnil(l);
     lua_pushinteger(l, r);
     return 2;
   }
@@ -173,6 +228,8 @@ LUALIB_API int luaopen_linux(lua_State *l) {
   //set_int_field(l, O_DIRECT);
   //set_int_field(l, O_NOATIME);
   set_int_field(l, O_NONBLOCK);
+  // wait
+  set_int_field(l, WNOHANG);
   lua_setfield(l, -2, "constants");
 
   lua_pushliteral(l, "Lua linux");
