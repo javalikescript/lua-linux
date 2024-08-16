@@ -9,6 +9,7 @@
 #include <sys/syscall.h>
 #include <unistd.h> /* getpid */
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #ifdef SYS_pidfd_open
 #include <poll.h>
 #else
@@ -158,6 +159,39 @@ static int lua_linux_fcntl(lua_State *l) {
   return 1;
 }
 
+static int lua_linux_lockf(lua_State *l) {
+  int fd = getFileDesc(l, 1);
+  int op = (int) luaL_checkinteger(l, 2);
+  int len = (int) luaL_checkinteger(l, 3);
+  int r = lockf(fd, op, len);
+  if (r == -1) {
+    r = errno;
+    lua_pushnil(l);
+    lua_pushinteger(l, r);
+    return 2;
+  }
+  lua_pushinteger(l, r);
+  return 1;
+}
+
+#define LUA_TO_POINTER(_LS, _INDEX) ((char *) \
+  (lua_isuserdata(_LS, _INDEX) ? lua_touserdata(_LS, _INDEX) : lua_tolstring(_LS, _INDEX, NULL)))
+
+static int lua_linux_ioctl(lua_State *l) {
+  int fd = getFileDesc(l, 1);
+  unsigned long request = (unsigned long) luaL_checkinteger(l, 2);
+  char *argp = LUA_TO_POINTER(l, 3);
+  int r = ioctl(fd, request, argp);
+  if (r == -1) {
+    r = errno;
+    lua_pushnil(l);
+    lua_pushinteger(l, r);
+    return 2;
+  }
+  lua_pushinteger(l, r);
+  return 1;
+}
+
 #define set_int_field(__LUA_STATE, __FIELD_NAME) \
   lua_pushinteger(__LUA_STATE, __FIELD_NAME); \
   lua_setfield(__LUA_STATE, -2, #__FIELD_NAME)
@@ -168,6 +202,8 @@ LUALIB_API int luaopen_linux(lua_State *l) {
     { "getpid", lua_linux_getpid },
     { "signal", lua_linux_signal },
     { "fcntl", lua_linux_fcntl },
+    { "ioctl", lua_linux_ioctl },
+    { "lockf", lua_linux_lockf },
     { "kill", lua_linux_kill },
     { "waitpid", lua_linux_waitpid },
     { NULL, NULL }
@@ -230,11 +266,16 @@ LUALIB_API int luaopen_linux(lua_State *l) {
   set_int_field(l, O_NONBLOCK);
   // wait
   set_int_field(l, WNOHANG);
+  // lock
+  set_int_field(l, F_LOCK);
+  set_int_field(l, F_TLOCK);
+  set_int_field(l, F_ULOCK);
+  set_int_field(l, F_TEST);
   lua_setfield(l, -2, "constants");
 
   lua_pushliteral(l, "Lua linux");
   lua_setfield(l, -2, "_NAME");
-  lua_pushliteral(l, "0.2");
+  lua_pushliteral(l, "0.3");
   lua_setfield(l, -2, "_VERSION");
   return 1;
 }
